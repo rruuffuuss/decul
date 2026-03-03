@@ -1,3 +1,7 @@
+//! Public control API for stepping the heater state machine.
+//!
+//! `HeaterEngine` owns runtime state and configuration whilst the logic is handled by the FSM module.
+//!
 use crate::{Config, CoreState, TickInput, TickOutput, fsm};
 
 #[derive(Debug, Clone)]

@@ -1,3 +1,7 @@
+//! Public domain types for heater control.
+//!
+//! These types are shared by simulation and embedded runtimes.
+//!
 pub type UtcTs = i64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

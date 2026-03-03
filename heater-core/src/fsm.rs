@@ -1,3 +1,8 @@
+//! Internal finite state machine 
+//!
+//! This module contains deterministic transition logic only.
+//!
+
 use crate::{
     ActuatorIntent, Config, CoreState, EffectiveMode, FaultCode, HeatStage, ModeRequest,
     ProcessState, SensorInput, Status, TickEvents, TickInput, TickOutput,

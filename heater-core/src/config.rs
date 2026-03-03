@@ -1,3 +1,7 @@
+//! Configuration model and in tick sanitisation.
+//!
+//! Sanitisation is kept internal and deterministic so runtime code keep ticking safely if configuration input is partially invalid.
+//!
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Config {
     pub preheat_ms: u32,
