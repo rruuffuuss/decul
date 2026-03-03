@@ -74,12 +74,12 @@ fn thermostat_demand(
     }
 }
 
-fn stage_from_error(error_c: f32, cfg: &Config) -> HeatStage {
-    if error_c >= cfg.stage_high_delta_c {
+fn stage_from_temp_difference(temp_difference_c: f32, cfg: &Config) -> HeatStage {
+    if temp_difference_c >= cfg.stage_high_delta_c {
         HeatStage::High
-    } else if error_c >= cfg.stage_medium_delta_c {
+    } else if temp_difference_c >= cfg.stage_medium_delta_c {
         HeatStage::Medium
-    } else if error_c >= cfg.stage_low_delta_c {
+    } else if temp_difference_c >= cfg.stage_low_delta_c {
         HeatStage::Low
     } else {
         HeatStage::Low
@@ -216,8 +216,8 @@ fn stage_for_run(
     };
 
     //
-    let error_c = setpoint_c - input.sensors.room_temp_c;
-    stage_from_error(error_c, cfg)
+    let temp_difference_c = setpoint_c - input.sensors.room_temp_c;
+    stage_from_temp_difference(temp_difference_c, cfg)
 }
 
 fn default_actuators_for_state(
@@ -300,7 +300,7 @@ pub(crate) fn tick(input: &TickInput, state: &mut CoreState, cfg: &Config) -> Ti
     }
 
     match state.process_state {
-        
+
         //idle
         //latched fault -> lockout
         //heat demand && off longer than minimum off time -> Precheck
