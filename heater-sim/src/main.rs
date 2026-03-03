@@ -22,8 +22,8 @@ impl Default for SimWorld {
     }
 }
 
-fn main() {
-    let cfg = Config {
+fn default_sim_config() -> Config {
+    Config {
         preheat_ms: 8_000,
         ignition_window_ms: 12_000,
         flame_stabilize_ms: 5_000,
@@ -38,15 +38,18 @@ fn main() {
         stage_medium_delta_c: 1.0,
         stage_high_delta_c: 2.0,
         boost_duration_ms: 120_000,
-    };
+    }
+}
 
+fn run_trace(total_steps: usize, dt_ms: u32) -> Vec<String> {
+    let cfg = default_sim_config();
     let mut state = CoreState::default();
     let mut world = SimWorld::default();
 
-    let dt_ms: u32 = 1_000;
-    let total_steps = 180;
-
-    println!("t_s,state,mode,stage,room_c,hx_c,flame,fan_pct,glow,fuel_hz,fault,events");
+    let mut lines = Vec::with_capacity(total_steps.saturating_add(1));
+    lines.push(
+        "t_s,state,mode,stage,room_c,hx_c,flame,fan_pct,glow,fuel_hz,fault,events".to_string(),
+    );
 
     for step in 0..total_steps {
         let monotonic_ms = (step as u64) * u64::from(dt_ms);
@@ -88,7 +91,7 @@ fn main() {
             output.events.ignition_retry_started
         );
 
-        println!(
+        lines.push(format!(
             "{},{:?},{:?},{:?},{:.2},{:.2},{},{},{},{:.2},{:?},{}",
             monotonic_ms / 1_000,
             output.status.process_state,
@@ -102,7 +105,15 @@ fn main() {
             output.actuators.fuel_pump_hz,
             output.status.fault,
             event_summary,
-        );
+        ));
+    }
+
+    lines
+}
+
+fn main() {
+    for line in run_trace(180, 1_000) {
+        println!("{line}");
     }
 }
 
@@ -158,4 +169,33 @@ fn update_world(world: &mut SimWorld, fuel_hz: f32, fan_pct: u8) {
 
     // Flame signal is derived from enough fuel delivery and exchanger temperature support.
     world.flame_present = fuel_hz > 1.0 && world.hx_temp_c > 35.0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_trace_regression() {
+        let actual = run_trace(11, 1_000);
+        let expected = vec![
+            "t_s,state,mode,stage,room_c,hx_c,flame,fan_pct,glow,fuel_hz,fault,events",
+            "0,Precheck,Manual,Off,15.05,20.00,false,0,false,0.00,None,enter=Some(Precheck)|fault_latched=None|fault_cleared=false|retry=false",
+            "1,Preheat,Manual,Off,15.10,19.98,false,25,true,0.00,None,enter=Some(Preheat)|fault_latched=None|fault_cleared=false|retry=false",
+            "2,Preheat,Manual,Off,15.15,19.96,false,25,true,0.00,None,enter=None|fault_latched=None|fault_cleared=false|retry=false",
+            "3,Preheat,Manual,Off,15.19,19.93,false,25,true,0.00,None,enter=None|fault_latched=None|fault_cleared=false|retry=false",
+            "4,Preheat,Manual,Off,15.24,19.91,false,25,true,0.00,None,enter=None|fault_latched=None|fault_cleared=false|retry=false",
+            "5,Preheat,Manual,Off,15.29,19.89,false,25,true,0.00,None,enter=None|fault_latched=None|fault_cleared=false|retry=false",
+            "6,Preheat,Manual,Off,15.33,19.87,false,25,true,0.00,None,enter=None|fault_latched=None|fault_cleared=false|retry=false",
+            "7,Preheat,Manual,Off,15.38,19.84,false,25,true,0.00,None,enter=None|fault_latched=None|fault_cleared=false|retry=false",
+            "8,Preheat,Manual,Off,15.42,19.82,false,25,true,0.00,None,enter=None|fault_latched=None|fault_cleared=false|retry=false",
+            "9,IgnitionTrial,Manual,Off,15.47,20.14,false,35,true,1.60,None,enter=Some(IgnitionTrial)|fault_latched=None|fault_cleared=false|retry=false",
+            "10,IgnitionTrial,Manual,Off,15.52,20.46,false,35,true,1.60,None,enter=None|fault_latched=None|fault_cleared=false|retry=false",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+
+        assert_eq!(actual, expected);
+    }
 }
