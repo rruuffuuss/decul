@@ -1,6 +1,6 @@
 use heater_core::{
-    CommandInput, Config, CoreState, ModeRequest, ScheduleEvalInput, SensorInput, TickInput,
-    TimeInput, tick,
+    CommandInput, Config, HeaterEngine, ModeRequest, ScheduleEvalInput, SensorInput, TickInput,
+    TimeInput,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -26,7 +26,7 @@ fn default_sim_config() -> Config {
     Config {
         preheat_ms: 8_000,
         ignition_window_ms: 12_000,
-        flame_stabilize_ms: 5_000,
+        flame_stabilise_ms: 5_000,
         retry_purge_ms: 6_000,
         cooldown_ms: 20_000,
         max_hx_temp_c: 230.0,
@@ -43,7 +43,7 @@ fn default_sim_config() -> Config {
 
 fn run_trace(total_steps: usize, dt_ms: u32) -> Vec<String> {
     let cfg = default_sim_config();
-    let mut state = CoreState::default();
+    let mut engine = HeaterEngine::new(cfg);
     let mut world = SimWorld::default();
 
     let mut lines = Vec::with_capacity(total_steps.saturating_add(1));
@@ -75,7 +75,7 @@ fn run_trace(total_steps: usize, dt_ms: u32) -> Vec<String> {
             schedule,
         };
 
-        let output = tick(&input, &mut state, &cfg);
+        let output = engine.step(&input);
 
         update_world(
             &mut world,

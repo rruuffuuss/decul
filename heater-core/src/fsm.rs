@@ -276,7 +276,7 @@ fn default_actuators_for_state(
 }
 
 /// Single deterministic control step.
-pub fn tick(input: &TickInput, state: &mut CoreState, cfg: &Config) -> TickOutput {
+pub(crate) fn tick(input: &TickInput, state: &mut CoreState, cfg: &Config) -> TickOutput {
     let mut events = TickEvents::default();
     let sanitised = cfg.sanitise();
     let cfg = sanitised.cfg;
@@ -300,7 +300,7 @@ pub fn tick(input: &TickInput, state: &mut CoreState, cfg: &Config) -> TickOutpu
     }
 
     match state.process_state {
-
+        
         //idle
         //latched fault -> lockout
         //heat demand && off longer than minimum off time -> Precheck
@@ -364,7 +364,6 @@ pub fn tick(input: &TickInput, state: &mut CoreState, cfg: &Config) -> TickOutpu
 
         //FlameStabilise
         //temporary state to set actuator values for warmup/flame stabilisation
-
         ProcessState::FlameStabilise => {
             if state.latched_fault.is_some() || !demand.heat_demand {
                 transition(state, &mut events, ProcessState::Shutdown);
@@ -378,7 +377,7 @@ pub fn tick(input: &TickInput, state: &mut CoreState, cfg: &Config) -> TickOutpu
         }
 
         //Run
-        //main state for heating 
+        //main state for heating
         //actuators vary depending on mode/setpoint
         //latched fault || turned off manually -> shutdown
         //flame sensor doesn't detect flame -> FlameLost latch fault then shutdown
@@ -395,7 +394,7 @@ pub fn tick(input: &TickInput, state: &mut CoreState, cfg: &Config) -> TickOutpu
                 transition(state, &mut events, ProcessState::Shutdown);
             }
         }
-        
+
         //shutdown
         //confirmation state before cooldown
         ProcessState::Shutdown => {
