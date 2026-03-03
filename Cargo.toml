@@ -1,0 +1,6 @@
+[workspace]
+members = [
+  "heater-core",
+  "heater-sim",
+]
+resolver = "2"
