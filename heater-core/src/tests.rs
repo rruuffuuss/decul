@@ -16,6 +16,12 @@ fn test_cfg() -> Config {
         stage_medium_delta_c: 1.0,
         stage_high_delta_c: 2.0,
         boost_duration_ms: 600,
+        has_flame_sensor: true,
+        has_overheat_cutoff: true,
+        ignition_min_rise_c: 8.0,
+        ignition_min_abs_c: 45.0,
+        run_min_temp_c: 40.0,
+        flame_loss_ms: 200,
     }
 }
 
@@ -36,7 +42,8 @@ fn input(
         sensors: SensorInput {
             room_temp_c: 15.0,
             hx_temp_c: 30.0,
-            flame_present: false,
+            flame_present: Some(false),
+            overheat_cutoff_tripped: Some(false),
             supply_v: 12.0,
             sensor_ok: true,
         },
@@ -69,7 +76,7 @@ fn run_to_run_state(engine: &mut HeaterEngine) {
 
     t += 100;
     i.time.monotonic_ms = t;
-    i.sensors.flame_present = true;
+    i.sensors.flame_present = Some(true);
     engine.step(&i);
 
     t += 100;
@@ -100,7 +107,7 @@ fn progression_reaches_run() {
 
     t += 100;
     i.time.monotonic_ms = t;
-    i.sensors.flame_present = true;
+    i.sensors.flame_present = Some(true);
     let out3 = engine.step(&i);
     assert_eq!(out3.status.process_state, ProcessState::FlameStabilise);
 
@@ -164,7 +171,7 @@ fn flame_loss_in_run_latches_fault() {
     run_to_run_state(&mut engine);
 
     let mut i = input(1_000, 100, None, false, None);
-    i.sensors.flame_present = false;
+    i.sensors.flame_present = Some(false);
     let out = engine.step(&i);
 
     assert_eq!(out.status.process_state, ProcessState::Shutdown);
@@ -241,13 +248,13 @@ fn anti_short_cycle_min_run_and_min_off() {
 
     let mut i = input(2_000, 100, None, false, None);
     i.sensors.room_temp_c = 30.0;
-    i.sensors.flame_present = true;
+    i.sensors.flame_present = Some(true);
     let out_hold = engine.step(&i);
     assert_eq!(out_hold.status.process_state, ProcessState::Run);
 
     i.time.monotonic_ms = 2_300;
     i.time.delta_ms = 300;
-    i.sensors.flame_present = true;
+    i.sensors.flame_present = Some(true);
     let out_stop = engine.step(&i);
     assert_eq!(out_stop.status.process_state, ProcessState::Shutdown);
 
@@ -313,7 +320,7 @@ fn deterministic_for_identical_input_stream() {
             None,
         );
         if step >= 3 {
-            i.sensors.flame_present = true;
+            i.sensors.flame_present = Some(true);
         }
         if step >= 8 {
             i.sensors.room_temp_c = 30.0;
@@ -346,6 +353,12 @@ fn invalid_config_falls_back_to_defaults_flagged() {
         stage_medium_delta_c: 1.0,
         stage_high_delta_c: 0.5,
         boost_duration_ms: 0,
+        has_flame_sensor: true,
+        has_overheat_cutoff: true,
+        ignition_min_rise_c: 0.0,
+        ignition_min_abs_c: 500.0,
+        run_min_temp_c: 1_000.0,
+        flame_loss_ms: 0,
     };
 
     let mut engine = HeaterEngine::new(cfg);
@@ -353,4 +366,122 @@ fn invalid_config_falls_back_to_defaults_flagged() {
     let out = engine.step(&i);
 
     assert!(out.status.config_defaulted);
+}
+
+#[test]
+fn configured_flame_sensor_requires_signal() {
+    let cfg = test_cfg();
+    let state = CoreState {
+        process_state: ProcessState::Run,
+        selected_mode: ModeRequest::Manual,
+        effective_mode: EffectiveMode::Manual,
+        manual_setpoint_c: 21.0,
+        ..CoreState::default()
+    };
+    let mut engine = HeaterEngine::with_state(cfg, state);
+
+    let mut i = input(0, 100, None, false, None);
+    i.sensors.flame_present = None;
+
+    let out = engine.step(&i);
+    assert_eq!(out.status.fault, Some(FaultCode::SensorFault));
+    assert_eq!(out.status.process_state, ProcessState::Shutdown);
+}
+
+#[test]
+fn configured_cutoff_requires_signal() {
+    let mut engine = HeaterEngine::new(test_cfg());
+
+    let mut i = input(0, 100, Some(ModeRequest::Manual), false, None);
+    i.sensors.overheat_cutoff_tripped = None;
+
+    let out = engine.step(&i);
+    assert_eq!(out.status.fault, Some(FaultCode::SensorFault));
+    assert_eq!(out.status.process_state, ProcessState::Lockout);
+}
+
+#[test]
+fn configured_cutoff_trip_latches_overtemp_immediately() {
+    let mut engine = HeaterEngine::new(test_cfg());
+
+    let mut i = input(0, 100, Some(ModeRequest::Manual), false, None);
+    i.sensors.overheat_cutoff_tripped = Some(true);
+
+    let out = engine.step(&i);
+    assert_eq!(out.status.fault, Some(FaultCode::OverTemp));
+    assert_eq!(out.status.process_state, ProcessState::Lockout);
+    assert_eq!(out.actuators.fuel_pump_hz, 0.0);
+    assert!(!out.actuators.glow_on);
+}
+
+#[test]
+fn inferred_ignition_without_flame_sensor_reaches_run() {
+    let mut cfg = test_cfg();
+    cfg.has_flame_sensor = false;
+    cfg.has_overheat_cutoff = false;
+    cfg.ignition_min_rise_c = 2.0;
+    cfg.ignition_min_abs_c = 25.0;
+    cfg.run_min_temp_c = 20.0;
+    cfg.flame_loss_ms = 300;
+    let mut engine = HeaterEngine::new(cfg);
+
+    let mut t = 0;
+    let mut i = input(t, 100, Some(ModeRequest::Manual), false, None);
+    i.sensors.hx_temp_c = 20.0;
+    i.sensors.flame_present = None;
+    let out0 = engine.step(&i);
+    assert_eq!(out0.status.process_state, ProcessState::Precheck);
+
+    t += 100;
+    i.time.monotonic_ms = t;
+    let out1 = engine.step(&i);
+    assert_eq!(out1.status.process_state, ProcessState::Preheat);
+
+    t += 100;
+    i.time.monotonic_ms = t;
+    let out2 = engine.step(&i);
+    assert_eq!(out2.status.process_state, ProcessState::IgnitionTrial);
+
+    t += 100;
+    i.time.monotonic_ms = t;
+    i.sensors.hx_temp_c = 26.0;
+    let out3 = engine.step(&i);
+    assert_eq!(out3.status.process_state, ProcessState::FlameStabilise);
+
+    t += 100;
+    i.time.monotonic_ms = t;
+    let out4 = engine.step(&i);
+    assert_eq!(out4.status.process_state, ProcessState::Run);
+}
+
+#[test]
+fn inferred_flame_loss_without_flame_sensor_latches_fault() {
+    let mut cfg = test_cfg();
+    cfg.has_flame_sensor = false;
+    cfg.has_overheat_cutoff = false;
+    cfg.run_min_temp_c = 40.0;
+    cfg.flame_loss_ms = 200;
+
+    let state = CoreState {
+        process_state: ProcessState::Run,
+        selected_mode: ModeRequest::Manual,
+        effective_mode: EffectiveMode::Manual,
+        manual_setpoint_c: 21.0,
+        ..CoreState::default()
+    };
+    let mut engine = HeaterEngine::with_state(cfg, state);
+
+    let mut i = input(0, 100, None, false, None);
+    i.sensors.room_temp_c = 10.0;
+    i.sensors.hx_temp_c = 30.0;
+    i.sensors.flame_present = None;
+
+    let out_hold = engine.step(&i);
+    assert_eq!(out_hold.status.process_state, ProcessState::Run);
+    assert_eq!(out_hold.status.fault, None);
+
+    i.time.monotonic_ms = 100;
+    let out_loss = engine.step(&i);
+    assert_eq!(out_loss.status.process_state, ProcessState::Shutdown);
+    assert_eq!(out_loss.status.fault, Some(FaultCode::FlameLost));
 }
