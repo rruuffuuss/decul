@@ -18,6 +18,12 @@ pub struct Config {
     pub stage_medium_delta_c: f32,
     pub stage_high_delta_c: f32,
     pub boost_duration_ms: u32,
+    pub has_flame_sensor: bool,
+    pub has_overheat_cutoff: bool,
+    pub ignition_min_rise_c: f32,
+    pub ignition_min_abs_c: f32,
+    pub run_min_temp_c: f32,
+    pub flame_loss_ms: u32,
 }
 
 impl Default for Config {
@@ -37,6 +43,12 @@ impl Default for Config {
             stage_medium_delta_c: 1.0,
             stage_high_delta_c: 2.0,
             boost_duration_ms: 900_000,
+            has_flame_sensor: false,
+            has_overheat_cutoff: false,
+            ignition_min_rise_c: 8.0,
+            ignition_min_abs_c: 45.0,
+            run_min_temp_c: 40.0,
+            flame_loss_ms: 10_000,
         }
     }
 }
@@ -80,6 +92,7 @@ impl Config {
         validate_u32!(min_run_ms, 0, 3_600_000);
         validate_u32!(min_off_ms, 0, 3_600_000);
         validate_u32!(boost_duration_ms, 10_000, 86_400_000);
+        validate_u32!(flame_loss_ms, 100, 600_000);
 
         validate_f32!(max_hx_temp_c, 120.0, 350.0);
         validate_f32!(min_supply_v, 6.0, 30.0);
@@ -87,6 +100,9 @@ impl Config {
         validate_f32!(stage_low_delta_c, 0.05, 10.0);
         validate_f32!(stage_medium_delta_c, 0.05, 15.0);
         validate_f32!(stage_high_delta_c, 0.05, 20.0);
+        validate_f32!(ignition_min_rise_c, 0.1, 100.0);
+        validate_f32!(ignition_min_abs_c, -20.0, 200.0);
+        validate_f32!(run_min_temp_c, -20.0, 200.0);
 
         if !(cfg.stage_low_delta_c <= cfg.stage_medium_delta_c
             && cfg.stage_medium_delta_c <= cfg.stage_high_delta_c)
@@ -99,6 +115,17 @@ impl Config {
 
         if cfg.retry_purge_ms > cfg.cooldown_ms {
             cfg.retry_purge_ms = d.retry_purge_ms;
+            used_defaults = true;
+        }
+
+        if cfg.run_min_temp_c > cfg.ignition_min_abs_c {
+            cfg.run_min_temp_c = d.run_min_temp_c;
+            cfg.ignition_min_abs_c = d.ignition_min_abs_c;
+            used_defaults = true;
+        }
+
+        if cfg.ignition_min_abs_c >= cfg.max_hx_temp_c {
+            cfg.ignition_min_abs_c = d.ignition_min_abs_c;
             used_defaults = true;
         }
 

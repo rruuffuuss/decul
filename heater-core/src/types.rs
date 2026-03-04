@@ -62,7 +62,8 @@ pub struct TimeInput {
 pub struct SensorInput {
     pub room_temp_c: f32,
     pub hx_temp_c: f32,
-    pub flame_present: bool,
+    pub flame_present: Option<bool>,
+    pub overheat_cutoff_tripped: Option<bool>,
     pub supply_v: f32,
     pub sensor_ok: bool,
 }
@@ -137,6 +138,8 @@ pub struct CoreState {
     pub last_heat_stage: HeatStage,
     pub pending_restart_after_cooldown: bool,
     pub manual_setpoint_c: f32,
+    pub ignition_baseline_temp_c: f32,
+    pub low_temp_elapsed_ms: u64,
 }
 
 impl Default for CoreState {
@@ -154,6 +157,8 @@ impl Default for CoreState {
             last_heat_stage: HeatStage::Off,
             pending_restart_after_cooldown: false,
             manual_setpoint_c: 20.0,
+            ignition_baseline_temp_c: 0.0,
+            low_temp_elapsed_ms: 0,
         }
     }
 }

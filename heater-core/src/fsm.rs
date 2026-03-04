@@ -16,6 +16,13 @@ fn detect_safety_fault(input: &TickInput, cfg: &Config) -> Option<FaultCode> {
     if !is_finite_sensors(&input.sensors) {
         return Some(FaultCode::InvalidState);
     }
+    if cfg.has_overheat_cutoff {
+        match input.sensors.overheat_cutoff_tripped {
+            Some(true) => return Some(FaultCode::OverTemp),
+            Some(false) => {}
+            None => return Some(FaultCode::SensorFault),
+        }
+    }
     if !input.sensors.sensor_ok {
         return Some(FaultCode::SensorFault);
     }
@@ -88,6 +95,28 @@ fn stage_from_temp_difference(temp_difference_c: f32, cfg: &Config) -> HeatStage
         HeatStage::Low
     } else {
         HeatStage::Low
+    }
+}
+
+///prefer flame signal otherwise use inferred value from heat exchanger temp change
+fn resolve_flame_signal(input: &TickInput, cfg: &Config, inferred: bool) -> Result<bool, FaultCode> {
+    if cfg.has_flame_sensor {
+        input.sensors.flame_present.ok_or(FaultCode::SensorFault)
+    } else {
+        Ok(inferred)
+    }
+}
+
+fn infer_ignition_flame(input: &TickInput, state: &CoreState, cfg: &Config) -> bool {
+    let rise_c = input.sensors.hx_temp_c - state.ignition_baseline_temp_c;
+    rise_c >= cfg.ignition_min_rise_c && input.sensors.hx_temp_c >= cfg.ignition_min_abs_c
+}
+
+fn update_low_temp_timer(state: &mut CoreState, input: &TickInput, cfg: &Config, delta_ms: u64) {
+    if input.sensors.hx_temp_c < cfg.run_min_temp_c {
+        state.low_temp_elapsed_ms = state.low_temp_elapsed_ms.saturating_add(delta_ms);
+    } else {
+        state.low_temp_elapsed_ms = 0;
     }
 }
 
@@ -341,6 +370,8 @@ pub(crate) fn tick(input: &TickInput, state: &mut CoreState, cfg: &Config) -> Ti
                 transition(state, &mut events, ProcessState::Shutdown);
             } else if state.state_elapsed_ms >= u64::from(cfg.preheat_ms) {
                 state.ignition_attempt = state.ignition_attempt.saturating_add(1).min(2);
+                state.ignition_baseline_temp_c = input.sensors.hx_temp_c;
+                state.low_temp_elapsed_ms = 0;
                 transition(state, &mut events, ProcessState::IgnitionTrial);
             }
         }
@@ -348,21 +379,34 @@ pub(crate) fn tick(input: &TickInput, state: &mut CoreState, cfg: &Config) -> Ti
         //ignitiontrial
         //state for attempting & confirming ignition
         //latched fault || no heat demand -> shutdown
-        //ignition detected by flame sensor within ignition window-> flamestabilise
+        //ignition detected within ignition window-> flamestabilise
         //first failed ignition attempt -> shutdown and restart
         //second failed ignition attept -> shutdown with error
         ProcessState::IgnitionTrial => {
             if state.latched_fault.is_some() || !demand.heat_demand {
                 transition(state, &mut events, ProcessState::Shutdown);
-            } else if input.sensors.flame_present {
-                transition(state, &mut events, ProcessState::FlameStabilise);
-            } else if state.state_elapsed_ms >= u64::from(cfg.ignition_window_ms) {
-                if state.ignition_attempt < 2 {
-                    state.pending_restart_after_cooldown = true;
-                    transition(state, &mut events, ProcessState::Shutdown);
-                } else {
-                    latch_fault(state, &mut events, FaultCode::IgnitionFailed);
-                    transition(state, &mut events, ProcessState::Shutdown);
+            } else {
+                let inferred = infer_ignition_flame(input, state, &cfg);
+                match resolve_flame_signal(input, &cfg, inferred) {
+                    Ok(true) => {
+                        state.low_temp_elapsed_ms = 0;
+                        transition(state, &mut events, ProcessState::FlameStabilise);
+                    }
+                    Ok(false) => {
+                        if state.state_elapsed_ms >= u64::from(cfg.ignition_window_ms) {
+                            if state.ignition_attempt < 2 {
+                                state.pending_restart_after_cooldown = true;
+                                transition(state, &mut events, ProcessState::Shutdown);
+                            } else {
+                                latch_fault(state, &mut events, FaultCode::IgnitionFailed);
+                                transition(state, &mut events, ProcessState::Shutdown);
+                            }
+                        }
+                    }
+                    Err(fault) => {
+                        latch_fault(state, &mut events, fault);
+                        transition(state, &mut events, ProcessState::Shutdown);
+                    }
                 }
             }
         }
@@ -372,12 +416,31 @@ pub(crate) fn tick(input: &TickInput, state: &mut CoreState, cfg: &Config) -> Ti
         ProcessState::FlameStabilise => {
             if state.latched_fault.is_some() || !demand.heat_demand {
                 transition(state, &mut events, ProcessState::Shutdown);
-            } else if !input.sensors.flame_present {
-                latch_fault(state, &mut events, FaultCode::FlameLost);
-                transition(state, &mut events, ProcessState::Shutdown);
-            } else if state.state_elapsed_ms >= u64::from(cfg.flame_stabilise_ms) {
-                state.run_elapsed_ms = 0;
-                transition(state, &mut events, ProcessState::Run);
+            } else {
+                if !cfg.has_flame_sensor {
+                    update_low_temp_timer(state, input, &cfg, delta_ms);
+                } else {
+                    state.low_temp_elapsed_ms = 0;
+                }
+
+                let inferred_flame = state.low_temp_elapsed_ms < u64::from(cfg.flame_loss_ms);
+                match resolve_flame_signal(input, &cfg, inferred_flame) {
+                    Ok(true) => {
+                        if state.state_elapsed_ms >= u64::from(cfg.flame_stabilise_ms) {
+                            state.run_elapsed_ms = 0;
+                            state.low_temp_elapsed_ms = 0;
+                            transition(state, &mut events, ProcessState::Run);
+                        }
+                    }
+                    Ok(false) => {
+                        latch_fault(state, &mut events, FaultCode::FlameLost);
+                        transition(state, &mut events, ProcessState::Shutdown);
+                    }
+                    Err(fault) => {
+                        latch_fault(state, &mut events, fault);
+                        transition(state, &mut events, ProcessState::Shutdown);
+                    }
+                }
             }
         }
 
@@ -390,13 +453,31 @@ pub(crate) fn tick(input: &TickInput, state: &mut CoreState, cfg: &Config) -> Ti
         ProcessState::Run => {
             if state.latched_fault.is_some() {
                 transition(state, &mut events, ProcessState::Shutdown);
-            } else if !input.sensors.flame_present {
-                latch_fault(state, &mut events, FaultCode::FlameLost);
-                transition(state, &mut events, ProcessState::Shutdown);
-            } else if manual_off {
-                transition(state, &mut events, ProcessState::Shutdown);
-            } else if !demand.heat_demand && state.run_elapsed_ms >= u64::from(cfg.min_run_ms) {
-                transition(state, &mut events, ProcessState::Shutdown);
+            } else {
+                if !cfg.has_flame_sensor {
+                    update_low_temp_timer(state, input, &cfg, delta_ms);
+                } else {
+                    state.low_temp_elapsed_ms = 0;
+                }
+
+                let inferred_flame = state.low_temp_elapsed_ms < u64::from(cfg.flame_loss_ms);
+                match resolve_flame_signal(input, &cfg, inferred_flame) {
+                    Ok(false) => {
+                        latch_fault(state, &mut events, FaultCode::FlameLost);
+                        transition(state, &mut events, ProcessState::Shutdown);
+                    }
+                    Err(fault) => {
+                        latch_fault(state, &mut events, fault);
+                        transition(state, &mut events, ProcessState::Shutdown);
+                    }
+                    Ok(true) if manual_off => {
+                        transition(state, &mut events, ProcessState::Shutdown);
+                    }
+                    Ok(true) if !demand.heat_demand && state.run_elapsed_ms >= u64::from(cfg.min_run_ms) => {
+                        transition(state, &mut events, ProcessState::Shutdown);
+                    }
+                    Ok(true) => {}
+                }
             }
         }
 

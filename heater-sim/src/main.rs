@@ -38,6 +38,12 @@ fn default_sim_config() -> Config {
         stage_medium_delta_c: 1.0,
         stage_high_delta_c: 2.0,
         boost_duration_ms: 120_000,
+        has_flame_sensor: true,
+        has_overheat_cutoff: true,
+        ignition_min_rise_c: 8.0,
+        ignition_min_abs_c: 45.0,
+        run_min_temp_c: 40.0,
+        flame_loss_ms: 10_000,
     }
 }
 
@@ -67,7 +73,8 @@ fn run_trace(total_steps: usize, dt_ms: u32) -> Vec<String> {
             sensors: SensorInput {
                 room_temp_c: world.room_temp_c,
                 hx_temp_c: world.hx_temp_c,
-                flame_present: world.flame_present,
+                flame_present: Some(world.flame_present),
+                overheat_cutoff_tripped: Some(false),
                 supply_v: world.supply_v,
                 sensor_ok: true,
             },
