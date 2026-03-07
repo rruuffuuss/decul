@@ -7,6 +7,13 @@ name = "heater-core"
 version = "0.1.0"
 
 [[package]]
+name = "heater-ports"
+version = "0.1.0"
+dependencies = [
+ "heater-core",
+]
+
+[[package]]
 name = "heater-sim"
 version = "0.1.0"
 dependencies = [
