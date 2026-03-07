@@ -192,6 +192,32 @@ fn safety_fault_overtemp_forces_safe_outputs() {
 }
 
 #[test]
+fn safety_fault_undervoltage_in_active_path_enters_cooldown_then_lockout() {
+    let mut cfg = test_cfg();
+    cfg.cooldown_ms = 100;
+    let mut engine = HeaterEngine::new(cfg);
+
+    let mut i = input(0, 100, Some(ModeRequest::Manual), false, None);
+    let out0 = engine.step(&i);
+    assert_eq!(out0.status.process_state, ProcessState::Precheck);
+
+    i.time.monotonic_ms = 100;
+    i.commands.mode_request = None;
+    i.sensors.supply_v = 9.0;
+    let out1 = engine.step(&i);
+    assert_eq!(out1.status.fault, Some(FaultCode::UnderVoltage));
+    assert_eq!(out1.status.process_state, ProcessState::Cooldown);
+    assert_eq!(out1.actuators.fuel_pump_hz, 0.0);
+
+    i.time.monotonic_ms = 200;
+    let out2 = engine.step(&i);
+    assert_eq!(out2.status.process_state, ProcessState::Lockout);
+    assert_eq!(out2.status.fault, Some(FaultCode::UnderVoltage));
+    assert_eq!(out2.actuators.fuel_pump_hz, 0.0);
+    assert!(!out2.actuators.glow_on);
+}
+
+#[test]
 fn schedule_inhibited_without_valid_time_but_manual_works() {
     let mut engine = HeaterEngine::new(test_cfg());
 
@@ -484,4 +510,277 @@ fn inferred_flame_loss_without_flame_sensor_latches_fault() {
     let out_loss = engine.step(&i);
     assert_eq!(out_loss.status.process_state, ProcessState::Shutdown);
     assert_eq!(out_loss.status.fault, Some(FaultCode::FlameLost));
+}
+
+#[test]
+fn flame_loss_timer_resets_when_hx_recovers() {
+    let mut cfg = test_cfg();
+    cfg.has_flame_sensor = false;
+    cfg.has_overheat_cutoff = false;
+    cfg.run_min_temp_c = 40.0;
+    cfg.flame_loss_ms = 200;
+
+    let state = CoreState {
+        process_state: ProcessState::Run,
+        selected_mode: ModeRequest::Manual,
+        effective_mode: EffectiveMode::Manual,
+        manual_setpoint_c: 21.0,
+        ..CoreState::default()
+    };
+    let mut engine = HeaterEngine::with_state(cfg, state);
+
+    let mut i = input(0, 100, None, false, None);
+    i.sensors.room_temp_c = 10.0;
+    i.sensors.flame_present = None;
+
+    i.sensors.hx_temp_c = 30.0;
+    let out_low_1 = engine.step(&i);
+    assert_eq!(out_low_1.status.process_state, ProcessState::Run);
+    assert_eq!(out_low_1.status.fault, None);
+
+    i.time.monotonic_ms = 100;
+    i.sensors.hx_temp_c = 45.0;
+    let out_recover = engine.step(&i);
+    assert_eq!(out_recover.status.process_state, ProcessState::Run);
+    assert_eq!(out_recover.status.fault, None);
+
+    i.time.monotonic_ms = 200;
+    i.sensors.hx_temp_c = 30.0;
+    let out_low_2 = engine.step(&i);
+    assert_eq!(out_low_2.status.process_state, ProcessState::Run);
+    assert_eq!(out_low_2.status.fault, None);
+
+    i.time.monotonic_ms = 300;
+    i.sensors.hx_temp_c = 30.0;
+    let out_low_3 = engine.step(&i);
+    assert_eq!(out_low_3.status.process_state, ProcessState::Shutdown);
+    assert_eq!(out_low_3.status.fault, Some(FaultCode::FlameLost));
+}
+
+#[test]
+fn ignition_baseline_captured_and_used_for_inference() {
+    let mut cfg = test_cfg();
+    cfg.has_flame_sensor = false;
+    cfg.has_overheat_cutoff = false;
+    cfg.ignition_window_ms = 500;
+    cfg.ignition_min_rise_c = 4.0;
+    cfg.ignition_min_abs_c = 45.0;
+
+    let mut engine = HeaterEngine::new(cfg);
+    let mut t = 0;
+    let mut i = input(t, 100, Some(ModeRequest::Manual), false, None);
+    i.sensors.flame_present = None;
+    i.sensors.hx_temp_c = 50.0;
+
+    let out0 = engine.step(&i);
+    assert_eq!(out0.status.process_state, ProcessState::Precheck);
+
+    t += 100;
+    i.time.monotonic_ms = t;
+    let out1 = engine.step(&i);
+    assert_eq!(out1.status.process_state, ProcessState::Preheat);
+
+    t += 100;
+    i.time.monotonic_ms = t;
+    let out2 = engine.step(&i);
+    assert_eq!(out2.status.process_state, ProcessState::IgnitionTrial);
+    assert_eq!(engine.state().ignition_baseline_temp_c, 50.0);
+
+    t += 100;
+    i.time.monotonic_ms = t;
+    i.sensors.hx_temp_c = 53.0;
+    let out3 = engine.step(&i);
+    assert_eq!(out3.status.process_state, ProcessState::IgnitionTrial);
+
+    t += 100;
+    i.time.monotonic_ms = t;
+    i.sensors.hx_temp_c = 54.0;
+    let out4 = engine.step(&i);
+    assert_eq!(out4.status.process_state, ProcessState::FlameStabilise);
+}
+
+#[test]
+fn cutoff_trip_precedes_other_safety_faults() {
+    let mut engine = HeaterEngine::new(test_cfg());
+    let mut i = input(0, 100, Some(ModeRequest::Manual), false, None);
+    i.sensors.overheat_cutoff_tripped = Some(true);
+    i.sensors.sensor_ok = false;
+    i.sensors.hx_temp_c = 300.0;
+    i.sensors.supply_v = 2.0;
+
+    let out = engine.step(&i);
+    assert_eq!(out.status.fault, Some(FaultCode::OverTemp));
+    assert_eq!(out.events.fault_latched, Some(FaultCode::OverTemp));
+    assert_eq!(out.status.process_state, ProcessState::Lockout);
+}
+
+#[test]
+fn manual_off_bypasses_min_run_but_uses_shutdown_and_cooldown() {
+    let mut cfg = test_cfg();
+    cfg.min_run_ms = 120_000;
+
+    let state = CoreState {
+        process_state: ProcessState::Run,
+        selected_mode: ModeRequest::Manual,
+        effective_mode: EffectiveMode::Manual,
+        manual_setpoint_c: 21.0,
+        run_elapsed_ms: 0,
+        ..CoreState::default()
+    };
+    let mut engine = HeaterEngine::with_state(cfg, state);
+
+    let mut i = input(0, 100, Some(ModeRequest::Off), false, None);
+    i.sensors.flame_present = Some(true);
+    i.sensors.room_temp_c = 10.0;
+    let out_shutdown = engine.step(&i);
+    assert_eq!(out_shutdown.status.process_state, ProcessState::Shutdown);
+    assert_eq!(out_shutdown.actuators.fuel_pump_hz, 0.0);
+
+    i.time.monotonic_ms = 100;
+    i.commands.mode_request = None;
+    let out_cooldown = engine.step(&i);
+    assert_eq!(out_cooldown.status.process_state, ProcessState::Cooldown);
+    assert_eq!(out_cooldown.actuators.fuel_pump_hz, 0.0);
+}
+
+#[test]
+fn fault_reset_denied_while_cutoff_still_tripped() {
+    let mut engine = HeaterEngine::new(test_cfg());
+    let mut i = input(0, 100, Some(ModeRequest::Manual), false, None);
+    i.sensors.overheat_cutoff_tripped = Some(true);
+
+    let out_fault = engine.step(&i);
+    assert_eq!(out_fault.status.process_state, ProcessState::Lockout);
+    assert_eq!(out_fault.status.fault, Some(FaultCode::OverTemp));
+
+    i.time.monotonic_ms = 100;
+    i.commands.mode_request = None;
+    i.commands.fault_reset_request = true;
+    i.sensors.overheat_cutoff_tripped = Some(true);
+    let out_reject = engine.step(&i);
+    assert_eq!(out_reject.status.process_state, ProcessState::Lockout);
+    assert!(!out_reject.events.fault_cleared);
+
+    i.time.monotonic_ms = 200;
+    i.sensors.overheat_cutoff_tripped = Some(false);
+    let out_accept = engine.step(&i);
+    assert_eq!(out_accept.status.process_state, ProcessState::Idle);
+    assert!(out_accept.events.fault_cleared);
+}
+
+#[test]
+fn deterministic_with_zero_and_large_deltas() {
+    let cfg = test_cfg();
+    let mut a = HeaterEngine::new(cfg);
+    let mut b = HeaterEngine::new(cfg);
+
+    let deltas_ms = [0_u32, 0, 100, 10_000, 50_000, 100, 0];
+    let mut monotonic_ms = 0_u64;
+    let mut stream = Vec::new();
+
+    for (idx, delta_ms) in deltas_ms.into_iter().enumerate() {
+        let mut i = input(
+            monotonic_ms,
+            delta_ms,
+            if idx == 0 {
+                Some(ModeRequest::Manual)
+            } else {
+                None
+            },
+            false,
+            None,
+        );
+        i.sensors.room_temp_c = 10.0;
+        i.sensors.hx_temp_c = 60.0;
+        i.sensors.flame_present = Some(true);
+        stream.push(i);
+        monotonic_ms = monotonic_ms.saturating_add(u64::from(delta_ms));
+    }
+
+    let out_a: Vec<_> = stream.iter().map(|i| a.step(i)).collect();
+    let out_b: Vec<_> = stream.iter().map(|i| b.step(i)).collect();
+    assert_eq!(out_a, out_b);
+    assert_eq!(a.state(), b.state());
+
+    for out in out_a {
+        if matches!(
+            out.status.process_state,
+            ProcessState::Idle
+                | ProcessState::Precheck
+                | ProcessState::Preheat
+                | ProcessState::Shutdown
+                | ProcessState::Cooldown
+                | ProcessState::Lockout
+        ) {
+            assert_eq!(out.actuators.fuel_pump_hz, 0.0);
+        }
+        if out.status.process_state == ProcessState::Lockout {
+            assert!(!out.actuators.glow_on);
+            assert_eq!(out.actuators.fan_pct, 0);
+        }
+    }
+}
+
+#[test]
+fn events_are_edge_triggered_not_level_triggered() {
+    let mut cfg = test_cfg();
+    cfg.preheat_ms = 300;
+    let mut engine = HeaterEngine::new(cfg);
+
+    let mut i = input(0, 100, Some(ModeRequest::Manual), false, None);
+    let out0 = engine.step(&i);
+    assert_eq!(out0.events.entered_state, Some(ProcessState::Precheck));
+
+    i.time.monotonic_ms = 100;
+    let out1 = engine.step(&i);
+    assert_eq!(out1.events.entered_state, Some(ProcessState::Preheat));
+
+    i.time.monotonic_ms = 200;
+    let out2 = engine.step(&i);
+    assert_eq!(out2.status.process_state, ProcessState::Preheat);
+    assert_eq!(out2.events.entered_state, None);
+
+    let state = CoreState {
+        process_state: ProcessState::Run,
+        selected_mode: ModeRequest::Manual,
+        effective_mode: EffectiveMode::Manual,
+        manual_setpoint_c: 21.0,
+        ..CoreState::default()
+    };
+    let mut engine_fault = HeaterEngine::with_state(test_cfg(), state);
+    let mut j = input(0, 100, None, false, None);
+    j.sensors.flame_present = Some(false);
+
+    let out_fault_1 = engine_fault.step(&j);
+    assert_eq!(out_fault_1.events.fault_latched, Some(FaultCode::FlameLost));
+
+    j.time.monotonic_ms = 100;
+    let out_fault_2 = engine_fault.step(&j);
+    assert_eq!(out_fault_2.events.fault_latched, None);
+
+    let mut cfg_retry = test_cfg();
+    cfg_retry.preheat_ms = 100;
+    cfg_retry.ignition_window_ms = 100;
+    cfg_retry.retry_purge_ms = 100;
+    cfg_retry.cooldown_ms = 100;
+    let mut engine_retry = HeaterEngine::new(cfg_retry);
+    let mut k = input(0, 100, Some(ModeRequest::Manual), false, None);
+    k.sensors.flame_present = Some(false);
+
+    engine_retry.step(&k);
+    k.time.monotonic_ms = 100;
+    engine_retry.step(&k);
+    k.time.monotonic_ms = 200;
+    engine_retry.step(&k);
+    k.time.monotonic_ms = 300;
+    engine_retry.step(&k);
+    k.time.monotonic_ms = 400;
+    engine_retry.step(&k);
+    k.time.monotonic_ms = 500;
+    let out_retry = engine_retry.step(&k);
+    assert!(out_retry.events.ignition_retry_started);
+
+    k.time.monotonic_ms = 600;
+    let out_after_retry = engine_retry.step(&k);
+    assert!(!out_after_retry.events.ignition_retry_started);
 }
