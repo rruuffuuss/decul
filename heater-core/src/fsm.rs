@@ -35,6 +35,51 @@ fn detect_safety_fault(input: &TickInput, cfg: &Config) -> Option<FaultCode> {
     None
 }
 
+fn fan_monitoring_required(process_state: ProcessState) -> bool {
+    matches!(
+        process_state,
+        ProcessState::Preheat
+            | ProcessState::IgnitionTrial
+            | ProcessState::FlameStabilise
+            | ProcessState::Run
+            | ProcessState::Shutdown
+            | ProcessState::Cooldown
+    )
+}
+
+fn detect_fan_stall_fault(
+    input: &TickInput,
+    state: &mut CoreState,
+    cfg: &Config,
+    delta_ms: u64,
+) -> Option<FaultCode> {
+    if !cfg.has_fan_tach {
+        state.fan_stall_elapsed_ms = 0;
+        return None;
+    }
+
+    if !fan_monitoring_required(state.process_state) {
+        state.fan_stall_elapsed_ms = 0;
+        return None;
+    }
+
+    let Some(rpm) = input.sensors.fan_rpm else {
+        return Some(FaultCode::SensorFault);
+    };
+
+    if u32::from(rpm) >= u32::from(cfg.fan_stall_min_rpm) {
+        state.fan_stall_elapsed_ms = 0;
+        return None;
+    }
+
+    state.fan_stall_elapsed_ms = state.fan_stall_elapsed_ms.saturating_add(delta_ms);
+    if state.fan_stall_elapsed_ms >= u64::from(cfg.fan_stall_ms) {
+        Some(FaultCode::FanStall)
+    } else {
+        None
+    }
+}
+
 fn transition(state: &mut CoreState, events: &mut TickEvents, next: ProcessState) {
     if state.process_state != next {
         state.process_state = next;
@@ -329,7 +374,11 @@ pub(crate) fn tick(input: &TickInput, state: &mut CoreState, cfg: &Config) -> Ti
     let manual_off = state.selected_mode == ModeRequest::Off;
 
     if let Some(safety_fault) = detect_safety_fault(input, &cfg) {
+        state.fan_stall_elapsed_ms = 0;
         latch_fault(state, &mut events, safety_fault);
+        force_safe_shutdown_path(state, &mut events);
+    } else if let Some(fan_fault) = detect_fan_stall_fault(input, state, &cfg, delta_ms) {
+        latch_fault(state, &mut events, fan_fault);
         force_safe_shutdown_path(state, &mut events);
     }
 
@@ -508,6 +557,7 @@ pub(crate) fn tick(input: &TickInput, state: &mut CoreState, cfg: &Config) -> Ti
                     state.run_elapsed_ms = 0;
                     state.last_heat_stage = HeatStage::Off;
                     state.off_elapsed_ms = 0;
+                    state.fan_stall_elapsed_ms = 0;
                     transition(state, &mut events, ProcessState::Idle);
                 }
             }
@@ -523,6 +573,7 @@ pub(crate) fn tick(input: &TickInput, state: &mut CoreState, cfg: &Config) -> Ti
                 state.pending_restart_after_cooldown = false;
                 state.last_heat_stage = HeatStage::Off;
                 state.off_elapsed_ms = 0;
+                state.fan_stall_elapsed_ms = 0;
                 events.fault_cleared = true;
                 transition(state, &mut events, ProcessState::Idle);
             }

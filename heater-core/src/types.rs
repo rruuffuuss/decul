@@ -44,6 +44,7 @@ pub enum HeatStage {
 pub enum FaultCode {
     IgnitionFailed,
     FlameLost,
+    FanStall,
     OverTemp,
     UnderVoltage,
     SensorFault,
@@ -64,6 +65,7 @@ pub struct SensorInput {
     pub hx_temp_c: f32,
     pub flame_present: Option<bool>,
     pub overheat_cutoff_tripped: Option<bool>,
+    pub fan_rpm: Option<u16>,
     pub supply_v: f32,
     pub sensor_ok: bool,
 }
@@ -140,6 +142,7 @@ pub struct CoreState {
     pub manual_setpoint_c: f32,
     pub ignition_baseline_temp_c: f32,
     pub low_temp_elapsed_ms: u64,
+    pub fan_stall_elapsed_ms: u64,
 }
 
 impl Default for CoreState {
@@ -159,6 +162,7 @@ impl Default for CoreState {
             manual_setpoint_c: 20.0,
             ignition_baseline_temp_c: 0.0,
             low_temp_elapsed_ms: 0,
+            fan_stall_elapsed_ms: 0,
         }
     }
 }

@@ -18,10 +18,13 @@ fn test_cfg() -> Config {
         boost_duration_ms: 600,
         has_flame_sensor: true,
         has_overheat_cutoff: true,
+        has_fan_tach: false,
         ignition_min_rise_c: 8.0,
         ignition_min_abs_c: 45.0,
         run_min_temp_c: 40.0,
         flame_loss_ms: 200,
+        fan_stall_min_rpm: 300,
+        fan_stall_ms: 3_000,
     }
 }
 
@@ -44,6 +47,7 @@ fn input(
             hx_temp_c: 30.0,
             flame_present: Some(false),
             overheat_cutoff_tripped: Some(false),
+            fan_rpm: Some(1_200),
             supply_v: 12.0,
             sensor_ok: true,
         },
@@ -381,10 +385,13 @@ fn invalid_config_falls_back_to_defaults_flagged() {
         boost_duration_ms: 0,
         has_flame_sensor: true,
         has_overheat_cutoff: true,
+        has_fan_tach: true,
         ignition_min_rise_c: 0.0,
         ignition_min_abs_c: 500.0,
         run_min_temp_c: 1_000.0,
         flame_loss_ms: 0,
+        fan_stall_min_rpm: 0,
+        fan_stall_ms: 0,
     };
 
     let mut engine = HeaterEngine::new(cfg);
@@ -438,6 +445,59 @@ fn configured_cutoff_trip_latches_overtemp_immediately() {
     assert_eq!(out.status.process_state, ProcessState::Lockout);
     assert_eq!(out.actuators.fuel_pump_hz, 0.0);
     assert!(!out.actuators.glow_on);
+}
+
+#[test]
+fn configured_fan_tach_requires_signal_when_monitored() {
+    let mut cfg = test_cfg();
+    cfg.has_fan_tach = true;
+
+    let state = CoreState {
+        process_state: ProcessState::Run,
+        selected_mode: ModeRequest::Manual,
+        effective_mode: EffectiveMode::Manual,
+        manual_setpoint_c: 21.0,
+        ..CoreState::default()
+    };
+    let mut engine = HeaterEngine::with_state(cfg, state);
+
+    let mut i = input(0, 100, None, false, None);
+    i.sensors.flame_present = Some(true);
+    i.sensors.fan_rpm = None;
+
+    let out = engine.step(&i);
+    assert_eq!(out.status.fault, Some(FaultCode::SensorFault));
+    assert_eq!(out.status.process_state, ProcessState::Cooldown);
+}
+
+#[test]
+fn low_fan_rpm_latches_fan_stall_after_timeout() {
+    let mut cfg = test_cfg();
+    cfg.has_fan_tach = true;
+    cfg.fan_stall_min_rpm = 500;
+    cfg.fan_stall_ms = 200;
+
+    let state = CoreState {
+        process_state: ProcessState::Run,
+        selected_mode: ModeRequest::Manual,
+        effective_mode: EffectiveMode::Manual,
+        manual_setpoint_c: 21.0,
+        ..CoreState::default()
+    };
+    let mut engine = HeaterEngine::with_state(cfg, state);
+
+    let mut i = input(0, 100, None, false, None);
+    i.sensors.flame_present = Some(true);
+    i.sensors.fan_rpm = Some(100);
+    let out_hold = engine.step(&i);
+    assert_eq!(out_hold.status.process_state, ProcessState::Run);
+    assert_eq!(out_hold.status.fault, None);
+
+    i.time.monotonic_ms = 100;
+    let out_fault = engine.step(&i);
+    assert_eq!(out_fault.status.fault, Some(FaultCode::FanStall));
+    assert_eq!(out_fault.status.process_state, ProcessState::Cooldown);
+    assert_eq!(out_fault.actuators.fuel_pump_hz, 0.0);
 }
 
 #[test]

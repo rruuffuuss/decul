@@ -20,10 +20,13 @@ pub struct Config {
     pub boost_duration_ms: u32,
     pub has_flame_sensor: bool,
     pub has_overheat_cutoff: bool,
+    pub has_fan_tach: bool,
     pub ignition_min_rise_c: f32,
     pub ignition_min_abs_c: f32,
     pub run_min_temp_c: f32,
     pub flame_loss_ms: u32,
+    pub fan_stall_min_rpm: u16,
+    pub fan_stall_ms: u32,
 }
 
 impl Default for Config {
@@ -45,10 +48,13 @@ impl Default for Config {
             boost_duration_ms: 900_000,
             has_flame_sensor: false,
             has_overheat_cutoff: false,
+            has_fan_tach: false,
             ignition_min_rise_c: 8.0,
             ignition_min_abs_c: 45.0,
             run_min_temp_c: 40.0,
             flame_loss_ms: 10_000,
+            fan_stall_min_rpm: 300,
+            fan_stall_ms: 3_000,
         }
     }
 }
@@ -84,6 +90,15 @@ impl Config {
             };
         }
 
+        macro_rules! validate_u16 {
+            ($field:ident, $min:expr, $max:expr) => {
+                if !(($min..=$max).contains(&cfg.$field)) {
+                    cfg.$field = d.$field;
+                    used_defaults = true;
+                }
+            };
+        }
+
         validate_u32!(preheat_ms, 50, 120_000);
         validate_u32!(ignition_window_ms, 50, 240_000);
         validate_u32!(flame_stabilise_ms, 50, 120_000);
@@ -93,6 +108,7 @@ impl Config {
         validate_u32!(min_off_ms, 0, 3_600_000);
         validate_u32!(boost_duration_ms, 10_000, 86_400_000);
         validate_u32!(flame_loss_ms, 100, 600_000);
+        validate_u32!(fan_stall_ms, 100, 60_000);
 
         validate_f32!(max_hx_temp_c, 120.0, 350.0);
         validate_f32!(min_supply_v, 6.0, 30.0);
@@ -103,6 +119,7 @@ impl Config {
         validate_f32!(ignition_min_rise_c, 0.1, 100.0);
         validate_f32!(ignition_min_abs_c, -20.0, 200.0);
         validate_f32!(run_min_temp_c, -20.0, 200.0);
+        validate_u16!(fan_stall_min_rpm, 50, 20_000);
 
         if !(cfg.stage_low_delta_c <= cfg.stage_medium_delta_c
             && cfg.stage_medium_delta_c <= cfg.stage_high_delta_c)

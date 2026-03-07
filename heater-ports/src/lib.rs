@@ -52,6 +52,7 @@ mod tests {
                 hx_temp_c: 45.0,
                 flame_present: Some(true),
                 overheat_cutoff_tripped: Some(false),
+                fan_rpm: Some(1_100),
                 supply_v: 12.2,
                 sensor_ok: true,
             }

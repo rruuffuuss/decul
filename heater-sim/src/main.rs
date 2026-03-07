@@ -40,10 +40,13 @@ fn default_sim_config() -> Config {
         boost_duration_ms: 120_000,
         has_flame_sensor: true,
         has_overheat_cutoff: true,
+        has_fan_tach: false,
         ignition_min_rise_c: 8.0,
         ignition_min_abs_c: 45.0,
         run_min_temp_c: 40.0,
         flame_loss_ms: 10_000,
+        fan_stall_min_rpm: 300,
+        fan_stall_ms: 3_000,
     }
 }
 
@@ -75,6 +78,7 @@ fn run_trace(total_steps: usize, dt_ms: u32) -> Vec<String> {
                 hx_temp_c: world.hx_temp_c,
                 flame_present: Some(world.flame_present),
                 overheat_cutoff_tripped: Some(false),
+                fan_rpm: None,
                 supply_v: world.supply_v,
                 sensor_ok: true,
             },
